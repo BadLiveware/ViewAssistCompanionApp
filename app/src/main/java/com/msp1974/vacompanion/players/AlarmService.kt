@@ -44,6 +44,10 @@ class AlarmService : Service() {
     private var hasAudioFocus = false
     private var fadeJob: Job? = null
     private var fadeVolume = 1f
+    private var fadeStartVolume = 1f
+    private var fadeDurationMs = 0L
+    private var fadeElapsedMs = 0L
+    private var fadeLastUpdateMs = 0L
     private var audioFocusVolumeMultiplier = 1f
     private val serviceScope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
 
@@ -102,11 +106,13 @@ class AlarmService : Service() {
     }
 
     fun pause() {
+        pauseFadeIn()
         mediaPlayer?.pause()
     }
 
     fun resume() {
         audioFocusVolumeMultiplier = 1f
+        resumeFadeIn()
         applyPlayerVolume()
 
         mediaPlayer?.let { player ->
@@ -140,20 +146,12 @@ class AlarmService : Service() {
             return
         }
 
-        val durationMs = durationMinutes.toLong() * 60_000L
-        val startedAtMs = SystemClock.elapsedRealtime()
+        fadeStartVolume = startVolume
+        fadeDurationMs = durationMinutes.toLong() * 60_000L
+        fadeElapsedMs = 0L
         fadeVolume = startVolume
         applyPlayerVolume()
-        fadeJob = serviceScope.launch {
-            while (isActive) {
-                val elapsedMs = SystemClock.elapsedRealtime() - startedAtMs
-                val progress = (elapsedMs.toFloat() / durationMs).coerceIn(0f, 1f)
-                fadeVolume = startVolume + ((1f - startVolume) * progress)
-                applyPlayerVolume()
-                if (progress >= 1f) break
-                delay(FADE_UPDATE_INTERVAL_MS)
-            }
-        }
+        launchFadeIn()
         Timber.i(
             "Alarm fading from %d%% to full volume over %d minute(s)",
             config.alarmFadeStartVolumePercent,
@@ -161,9 +159,48 @@ class AlarmService : Service() {
         )
     }
 
+    private fun launchFadeIn() {
+        if (fadeDurationMs <= 0L || fadeElapsedMs >= fadeDurationMs) return
+
+        fadeLastUpdateMs = SystemClock.elapsedRealtime()
+        fadeJob = serviceScope.launch {
+            while (isActive) {
+                updateFadeProgress()
+                if (fadeElapsedMs >= fadeDurationMs) break
+                delay(FADE_UPDATE_INTERVAL_MS)
+            }
+        }
+    }
+
+    private fun updateFadeProgress() {
+        val nowMs = SystemClock.elapsedRealtime()
+        val elapsedSinceUpdateMs = (nowMs - fadeLastUpdateMs).coerceAtLeast(0L)
+        fadeLastUpdateMs = nowMs
+        fadeElapsedMs = (fadeElapsedMs + elapsedSinceUpdateMs).coerceAtMost(fadeDurationMs)
+        val progress = fadeElapsedMs.toFloat() / fadeDurationMs
+        fadeVolume = fadeStartVolume + ((1f - fadeStartVolume) * progress)
+        applyPlayerVolume()
+    }
+
+    private fun pauseFadeIn() {
+        if (fadeJob?.isActive == true) {
+            updateFadeProgress()
+            fadeJob?.cancel()
+            fadeJob = null
+        }
+    }
+
+    private fun resumeFadeIn() {
+        if (fadeJob?.isActive != true) {
+            launchFadeIn()
+        }
+    }
+
     private fun cancelFadeIn() {
         fadeJob?.cancel()
         fadeJob = null
+        fadeDurationMs = 0L
+        fadeElapsedMs = 0L
     }
 
     private fun applyPlayerVolume() {
