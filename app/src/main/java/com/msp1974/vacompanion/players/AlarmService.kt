@@ -6,28 +6,50 @@ import android.content.Intent
 import android.media.AudioManager
 import android.net.Uri
 import android.os.IBinder
+import android.os.SystemClock
 import androidx.core.net.toUri
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
-import androidx.media3.common.C.USAGE_NOTIFICATION
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.audio.AudioFocusRequestCompat
 import androidx.media3.common.audio.AudioManagerCompat
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
-import com.msp1974.vacompanion.R
+import com.msp1974.vacompanion.device.DeviceManager
+import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import timber.log.Timber
+import javax.inject.Inject
 
+@AndroidEntryPoint
 @UnstableApi
 class AlarmService : Service() {
+
+    @Inject
+    lateinit var deviceManager: DeviceManager
+
+    private val config get() = deviceManager.config
 
     private lateinit var audioManager: AudioManager
     private var mediaPlayer: ExoPlayer? = null
     private var focusRequest: AudioFocusRequestCompat? = null
     private var hasAudioFocus = false
+    private var fadeJob: Job? = null
+    private var fadeVolume = 1f
+    private var audioFocusVolumeMultiplier = 1f
+    private val serviceScope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
 
     companion object {
+        private const val FADE_UPDATE_INTERVAL_MS = 250L
+
         var sInstance: AlarmService? = null
     }
 
@@ -67,14 +89,15 @@ class AlarmService : Service() {
             } else {
                 "asset:///alarm/default.mp3".toUri()
             }
+            cancelFadeIn()
             player.setMediaItem(MediaItem.fromUri(mediaUri))
             player.repeatMode = Player.REPEAT_MODE_ONE
             player.prepare()
-            player.volume = 1f
+            startFadeIn()
             requestAudioFocus()
             player.play()
         } catch (e: Exception) {
-            Timber.e("Error playing music: $e")
+            Timber.e("Error playing alarm: $e")
         }
     }
 
@@ -83,17 +106,18 @@ class AlarmService : Service() {
     }
 
     fun resume() {
+        audioFocusVolumeMultiplier = 1f
+        applyPlayerVolume()
+
         mediaPlayer?.let { player ->
-            if (!player.isPlaying) {
-                if (requestAudioFocus()) {
-                    player.play()
-                }
+            if (!player.isPlaying && requestAudioFocus()) {
+                player.play()
             }
-            player.volume = 1.0f
         }
     }
 
     fun stop() {
+        cancelFadeIn()
         mediaPlayer?.let { player ->
             try {
                 player.stop()
@@ -106,11 +130,53 @@ class AlarmService : Service() {
         }
     }
 
+    private fun startFadeIn() {
+        val durationMinutes = config.alarmFadeDurationMinutes.coerceIn(0, 30)
+        val startVolume = config.alarmFadeStartVolumePercent.coerceIn(0, 100) / 100f
+
+        if (durationMinutes == 0 || startVolume >= 1f) {
+            fadeVolume = 1f
+            applyPlayerVolume()
+            return
+        }
+
+        val durationMs = durationMinutes.toLong() * 60_000L
+        val startedAtMs = SystemClock.elapsedRealtime()
+        fadeVolume = startVolume
+        applyPlayerVolume()
+        fadeJob = serviceScope.launch {
+            while (isActive) {
+                val elapsedMs = SystemClock.elapsedRealtime() - startedAtMs
+                val progress = (elapsedMs.toFloat() / durationMs).coerceIn(0f, 1f)
+                fadeVolume = startVolume + ((1f - startVolume) * progress)
+                applyPlayerVolume()
+                if (progress >= 1f) break
+                delay(FADE_UPDATE_INTERVAL_MS)
+            }
+        }
+        Timber.i(
+            "Alarm fading from %d%% to full volume over %d minute(s)",
+            config.alarmFadeStartVolumePercent,
+            durationMinutes,
+        )
+    }
+
+    private fun cancelFadeIn() {
+        fadeJob?.cancel()
+        fadeJob = null
+    }
+
+    private fun applyPlayerVolume() {
+        mediaPlayer?.volume = (fadeVolume * audioFocusVolumeMultiplier).coerceIn(0f, 1f)
+    }
+
     @SuppressLint("UnsafeOptInUsageError")
     private fun requestAudioFocus(): Boolean {
-        @SuppressLint("UnsafeOptInUsageError")
+        if (hasAudioFocus) return true
+
+        val audioAttributes = mediaPlayer?.audioAttributes ?: return false
         focusRequest = AudioFocusRequestCompat.Builder(AudioManagerCompat.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
-            .setAudioAttributes(mediaPlayer?.audioAttributes!!)
+            .setAudioAttributes(audioAttributes)
             .setAcceptsDelayedFocusGain(true)
             .setWillPauseWhenDucked(false)
             .setOnAudioFocusChangeListener { focusChange ->
@@ -123,7 +189,7 @@ class AlarmService : Service() {
 
                     AudioManager.AUDIOFOCUS_LOSS -> {
                         hasAudioFocus = false
-                        stop()
+                        stopSelf()
                     }
 
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
@@ -132,7 +198,8 @@ class AlarmService : Service() {
                     }
 
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                        mediaPlayer?.volume = 0.2f
+                        audioFocusVolumeMultiplier = 0.2f
+                        applyPlayerVolume()
                     }
                 }
             }
@@ -147,13 +214,15 @@ class AlarmService : Service() {
 
     @SuppressLint("UnsafeOptInUsageError")
     private fun abandonAudioFocus() {
-        if (hasAudioFocus) AudioManagerCompat.abandonAudioFocusRequest(audioManager, focusRequest!!)
+        focusRequest?.let { AudioManagerCompat.abandonAudioFocusRequest(audioManager, it) }
+        focusRequest = null
         hasAudioFocus = false
         Timber.d("Alarm abandonAudioFocus")
     }
 
     override fun onDestroy() {
         stop()
+        serviceScope.cancel()
         abandonAudioFocus()
         sInstance = null
         super.onDestroy()
@@ -161,5 +230,4 @@ class AlarmService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
-
 }

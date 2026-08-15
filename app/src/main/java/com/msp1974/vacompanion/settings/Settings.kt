@@ -119,6 +119,14 @@ class APPConfig @Inject constructor(val context: Context) {
         onValueChangedListener(property, oldValue, newValue)
     }
 
+    var alarmFadeStartVolumePercent: Int by Delegates.observable(DEFAULT_ALARM_FADE_START_VOLUME_PERCENT) { property, oldValue, newValue ->
+        onValueChangedListener(property, oldValue, newValue)
+    }
+
+    var alarmFadeDurationMinutes: Int by Delegates.observable(DEFAULT_ALARM_FADE_DURATION_MINUTES) { property, oldValue, newValue ->
+        onValueChangedListener(property, oldValue, newValue)
+    }
+
     var rawProximitySensorThreshold: Int by Delegates.observable(DEFAULT_RAW_PROXIMITY_THRESHOLD) { property, oldValue, newValue ->
         onValueChangedListener(property, oldValue, newValue)
     }
@@ -329,6 +337,12 @@ class APPConfig @Inject constructor(val context: Context) {
         settings["wake_word"]?.jsonPrimitive?.contentOrNull?.let { wakeWord = it }
         settings["wake_word_sound"]?.jsonPrimitive?.contentOrNull?.let { wakeWordSound = it }
         settings["alarm_sound"]?.jsonPrimitive?.contentOrNull?.let { alarmSound = it }
+        settings["alarm_fade_start_volume"]?.jsonPrimitive?.floatOrNull?.let {
+            alarmFadeStartVolumePercent = it.toInt().coerceIn(0, 100)
+        }
+        settings["alarm_fade_duration"]?.jsonPrimitive?.floatOrNull?.let {
+            alarmFadeDurationMinutes = it.toInt().coerceIn(0, 30)
+        }
         settings["wake_word_threshold"]?.jsonPrimitive?.floatOrNull?.let { wakeWordThreshold = (it / 10).round(2) }
         settings["raw_proximity_threshold"]?.jsonPrimitive?.intOrNull?.let { rawProximitySensorThreshold = it }
         settings["notification_volume"]?.jsonPrimitive?.floatOrNull?.let { notificationVolume = it.toInt() }
@@ -410,6 +424,8 @@ class APPConfig @Inject constructor(val context: Context) {
         const val DEFAULT_WAKE_WORD = "hey_jarvis"
         const val DEFAULT_WAKE_WORD_SOUND = "none"
         const val DEFAULT_ALARM_SOUND = "alarm_sound"
+        const val DEFAULT_ALARM_FADE_START_VOLUME_PERCENT = 10
+        const val DEFAULT_ALARM_FADE_DURATION_MINUTES = 0
         const val DEFAULT_WAKE_WORD_THRESHOLD = 0.6f
         const val DEFAULT_NOTIFICATION_VOLUME = 10
         const val DEFAULT_MUSIC_VOLUME = 10
